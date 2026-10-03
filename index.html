@@ -5,6 +5,7 @@
 <meta name="viewport" content="width=device-width, initial-scale=1.0, viewport-fit=cover">
 <title>ObservApp · Cali</title>
 <link href="https://fonts.googleapis.com/css2?family=DM+Sans:wght@400;500;600;700;800;900&display=swap" rel="stylesheet">
+<script src="https://cdn.jsdelivr.net/npm/@supabase/supabase-js@2"></script>
 <style>
 :root{
   --bg:#f0f4f8; --s1:#ffffff; --s2:#f7f9fc; --s3:#edf1f6; --s4:#e2e8f0;
@@ -380,23 +381,6 @@ button{font-family:inherit;cursor:pointer;border:none;
     <br><button class="nsb" onclick="gt(0)">Ir a Inicio →</button>
   </div>
   <div id="ct1" style="display:none">
-    <div id="db-warn" style="display:none;background:#fff8e6;border:1.5px solid #ffc107;
-      border-radius:12px;padding:14px 16px;margin-bottom:14px">
-      <div style="font-size:.73rem;font-weight:800;color:#856404;margin-bottom:7px">
-        ⚠️ Tus datos NO llegarán al dashboard del coordinador
-      </div>
-      <div style="font-size:.74rem;color:#856404;line-height:1.7;margin-bottom:10px">
-        Para que el coordinador reciba tus respuestas:<br>
-        <b>1.</b> Ve a <b>claude.ai</b> e inicia sesión con tu correo<br>
-        <b>2.</b> Acepta la invitación que te llegó por email<br>
-        <b>3.</b> Vuelve aquí y recarga la página
-      </div>
-      <button onclick="window.open('https://claude.ai','_blank')"
-        style="width:100%;padding:11px;background:#f59e0b;color:#fff;border:none;
-        border-radius:8px;font-size:.82rem;font-weight:800;cursor:pointer;font-family:inherit">
-        Abrir Claude.ai para iniciar sesión →
-      </button>
-    </div>
     <div class="sh"><span class="sht">Módulo 1 — Semáforo en Rojo</span>
       <span class="shd">Tap = +1 · mantén placa = −1</span></div>
     <div id="m1-inner"></div>
@@ -471,6 +455,14 @@ button{font-family:inherit;cursor:pointer;border:none;
 
 <script>
 const KEY='cali-v12';
+/* ══ SUPABASE CONFIG ══
+   La anon key es pública y segura: RLS solo permite INSERT desde el cliente.
+   El dashboard lee/borra mediante /api/dashboard (Edge/serverless con service_role). */
+const SUPABASE_URL='https://yfbwdrxcjajbemjfremo.supabase.co';
+const SUPABASE_ANON='eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpc3MiOiJzdXBhYmFzZSIsInJlZiI6InlmYndkcnhjamFqYmVtamZyZW1vIiwicm9sZSI6ImFub24iLCJpYXQiOjE3OTA5ODIzMTEsImV4cCI6MjEwNjU1ODMxMX0.SxLCK5leuaP26K4BY1-VXbcfgFVyolujGvxLAXGnf28';
+const SUPABASE_BUCKET='observapp';
+let sb=null;
+try{ if(window.supabase && !SUPABASE_URL.startsWith('__')) sb=window.supabase.createClient(SUPABASE_URL,SUPABASE_ANON); }catch(e){console.warn('Supabase init:',e);}
 const LETTERS='ABCDEFGHIJKLMNOPQRSTUVWXYZ'.split('');
 const NAMES_DATA=[
   {n:'AGUIRRE QUIROGA KEVIN ANDRES',g:'Grupo 8'},
@@ -532,12 +524,42 @@ let S={on:false,t0:null,
   m1:{semNum:1,data:mkSem()},
   m2:{intentoNum:1,data:mkIntento()}
 };
-let dbApi=null,dlApi=null,unsubFn=null,timerIv=null,toastTv=null,allDocs=[];
+let timerIv=null,toastTv=null,allDocs=[],dashRefreshIv=null;
 function sv(){try{localStorage.setItem(KEY,JSON.stringify(S));}catch(e){}}
 function ld(){try{const d=localStorage.getItem(KEY);if(d){const p=JSON.parse(d);S={...S,...p};
   if(!S.m1||!S.m1.data)S.m1={semNum:1,data:mkSem()};
   if(!S.m2||!S.m2.data||Array.isArray(S.m2))S.m2={intentoNum:1,data:mkIntento()};}}catch(e){}}
-function gd(doc){return typeof doc.data==='function'?doc.data():doc.data;}
+
+/* ══ SUPABASE DATA LAYER (cliente, anon) ══ */
+function docToRow(doc){
+  return {id:doc.__id||doc.id,ts:doc.ts||Date.now(),obs:doc.obs||null,grp:doc.grp||null,
+    module:doc.module||null,mom:doc.mom||null,sent_at:doc.sentAt||new Date().toISOString(),
+    payload:doc};
+}
+async function insertDoc(doc){
+  if(!sb)throw new Error('Supabase no configurado');
+  doc.id=doc.id||(Date.now()+'-'+Math.random().toString(36).substr(2,6));
+  const {error}=await sb.from('submissions').insert(docToRow(doc));
+  if(error)throw error;
+  return doc.id;
+}
+let coordPin='';
+/* Llamada al proxy serverless con el PIN del coordinador */
+async function apiDash(action,payload){
+  const res=await fetch('/api/dashboard?action='+encodeURIComponent(action),{
+    method:'POST',
+    headers:{'Content-Type':'application/json','x-pin':coordPin||''},
+    body:JSON.stringify(Object.assign({action,pin:coordPin},payload||{})),
+  });
+  let data=null;try{data=await res.json();}catch(e){}
+  if(!res.ok)throw new Error((data&&data.error)||('HTTP '+res.status));
+  return data;
+}
+async function loadDocs(){
+  const {docs}=await apiDash('list');
+  allDocs=docs||[];
+  return allDocs;
+}
 
 async function init(){
   // ── DASHBOARD MODE (activated via PIN) ──
@@ -545,12 +567,10 @@ async function init(){
     document.getElementById('app').style.display='none';
     document.getElementById('dash-page').style.display='block';
     document.body.style.overflow='auto';
-    try{if(window.claude){
-      dbApi=await claude.use('db');
-      dlApi=await claude.use('downloads');
-      const bdl=document.getElementById('bdl');if(bdl&&dlApi)bdl.style.display='flex';
-      if(dbApi)subEnvios();
-    }}catch(e){}
+    coordPin=localStorage.getItem(PIN_KEY)||'';
+    refreshDash();
+    if(dashRefreshIv)clearInterval(dashRefreshIv);
+    dashRefreshIv=setInterval(()=>{if(IS_DASH)refreshDash();},15000);
     return;
   }
 
@@ -570,16 +590,12 @@ async function init(){
   buildM1();rM1();buildM2();rM2();
   S.on?showRun():showIdle();
   updSummary();initLongPress();
-  try{if(window.claude){
-    dbApi=await claude.use('db');
-    dlApi=await claude.use('downloads');
-    if(dbApi){subEnvios();setTimeout(syncPending,2000);}
-  }}catch(e){}
-  // Show warning banner if no DB access
-  const warn=document.getElementById('db-warn');
-  if(warn)warn.style.display=dbApi?'none':'block';
   // Auto-import from URL hash (when coordinator opens a student share link)
   checkHashImport();
+}
+async function refreshDash(){
+  try{ await loadDocs(); dpRender(); }
+  catch(e){ console.warn('refreshDash:',e.message); }
 }
 async function checkHashImport(){
   const hash=window.location.hash;
@@ -588,17 +604,16 @@ async function checkHashImport(){
   let doc;
   try{doc=JSON.parse(decodeURIComponent(escape(atob(b64))));}
   catch(e){return;}
-  if(!dbApi){
-    // Store for later if DB not ready yet — try after 3s
+  if(!sb){
     setTimeout(checkHashImport,3000);return;
   }
   try{
     const id=(doc.ts||Date.now())+'-h-'+Math.random().toString(36).substr(2,4);
-    delete doc.id;
-    await dbApi.collection('submissions').doc(id).set(doc);
+    delete doc.id;doc.__id=id;
+    await insertDoc(doc);
     history.replaceState(null,'',window.location.pathname); // clean URL
     toast('✅ Datos de '+doc.obs+' guardados en el dashboard');
-    if(IS_DASH)dpRender();
+    if(IS_DASH)refreshDash();
   }catch(e){console.warn('hash import error:',e);}
 }
 function onNameChange(){const nd=NAMES_DATA.find(d=>d.n===document.getElementById('iobs').value);if(nd)document.getElementById('igrp').value=nd.g;}
@@ -609,18 +624,38 @@ function setPhotoOk(boxId,src){
 }
 async function handlePhoto(input,ctx){
   if(!input.files||!input.files[0])return;
-  const c=await compressPhoto(input.files[0]);if(!c)return;
-  if(ctx==='main'){S.meta.photo=c;sv();setPhotoOk('photo-box',c);}
-  if(ctx==='env'){S.meta.endPhoto=c;sv();setPhotoOk('env-photo-box',c);}
-  toast('📷 Foto de cierre guardada');
+  const url=await compressPhoto(input.files[0]);if(!url)return;
+  if(ctx==='main'){S.meta.photo=url;sv();setPhotoOk('photo-box',url);}
+  if(ctx==='env'){S.meta.endPhoto=url;sv();setPhotoOk('env-photo-box',url);}
+  toast('📷 Foto guardada');
 }
+/* Comprime la imagen y la sube al bucket público de Supabase Storage.
+   Devuelve la URL pública (o base64 como respaldo si falla la subida). */
 function compressPhoto(file){return new Promise(resolve=>{
   const img=new Image();const url=URL.createObjectURL(file);
-  img.onload=()=>{const MAX=600;let w=img.width,h=img.height;
+  img.onload=async()=>{const MAX=600;let w=img.width,h=img.height;
     if(w>MAX){h=Math.round(h*MAX/w);w=MAX;}if(h>MAX){w=Math.round(w*MAX/h);h=MAX;}
     const c=document.createElement('canvas');c.width=w;c.height=h;
     c.getContext('2d').drawImage(img,0,0,w,h);URL.revokeObjectURL(url);
-    resolve(c.toDataURL('image/jpeg',0.5));};
+    const dataUrl=c.toDataURL('image/jpeg',0.5);
+    // Subir a Storage
+    if(sb){
+      try{
+        const blob=await new Promise(r=>c.toBlob(r,'image/jpeg',0.5));
+        if(blob){
+          const path=(S.meta.obs?S.meta.obs.split(' ')[0].replace(/[^a-zA-Z0-9]/g,''):'foto')
+            +'-'+Date.now()+'-'+Math.random().toString(36).substr(2,5)+'.jpg';
+          const {error}=await sb.storage.from(SUPABASE_BUCKET).upload(path,blob,{contentType:'image/jpeg',upsert:false});
+          if(!error){
+            const pub=sb.storage.from(SUPABASE_BUCKET).getPublicUrl(path);
+            return resolve((pub&&pub.data&&pub.data.publicUrl)||dataUrl);
+          }
+          console.warn('storage upload:',error.message);
+        }
+      }catch(e){console.warn('storage upload:',e.message);}
+    }
+    resolve(dataUrl); // fallback base64
+  };
   img.onerror=()=>{URL.revokeObjectURL(url);resolve(null);};img.src=url;});}
 
 function gt(i){
@@ -630,9 +665,9 @@ function gt(i){
   if(i===3){updSummary();showEnvPhoto();}
 }
 
-/* ══ MODE DETECTION (localStorage — works inside iframe) ══ */
+/* ══ MODE DETECTION (localStorage) ══ */
 const DASH_KEY = 'civismo-coordinator';
-const COORD_PIN = 'cali2025'; // Tu código de acceso
+const PIN_KEY  = 'civismo-pin';
 let IS_DASH = localStorage.getItem(DASH_KEY) === 'yes';
 
 function coordAccess(){
@@ -668,31 +703,40 @@ function coordAccess(){
   setTimeout(()=>document.getElementById('pin-inp')?.focus(), 80);
 }
 
-function checkPin(){
+async function checkPin(){
   const pin = document.getElementById('pin-inp')?.value||'';
-  if(pin.trim() === COORD_PIN){
-    document.getElementById('pin-ov')?.remove();
-    localStorage.setItem(DASH_KEY,'yes');
-    IS_DASH = true;
-    // Switch UI directly — no reload needed
-    document.getElementById('app').style.display = 'none';
-    document.getElementById('dash-page').style.display = 'block';
-    document.body.style.overflow = 'auto';
-    // Connect DB if not yet connected
-    if(dbApi){ dpRender(); }
-    else{ (async()=>{ try{ if(window.claude){ dbApi=await claude.use('db');dlApi=await claude.use('downloads');
-      const bdl=document.getElementById('bdl');if(bdl&&dlApi)bdl.style.display='flex';
-      if(dbApi)subEnvios(); }}catch(e){} })(); }
-  }else{
+  const err=document.getElementById('pin-err');
+  const btn=document.querySelector('#pin-ov button');
+  coordPin=pin.trim();
+  if(btn){btn.disabled=true;btn.textContent='Verificando...';}
+  try{
+    await apiDash('list'); // valida el PIN contra el servidor
+  }catch(e){
+    coordPin='';
+    if(btn){btn.disabled=false;btn.textContent='Entrar al Dashboard →';}
     const inp=document.getElementById('pin-inp');
-    const err=document.getElementById('pin-err');
     if(inp){inp.style.borderColor='#e63946';inp.value='';inp.focus();}
-    if(err)err.textContent='Código incorrecto, intenta de nuevo';
+    if(err)err.textContent=(e.message==='PIN incorrecto')?'Código incorrecto, intenta de nuevo':'No se pudo conectar — intenta de nuevo';
+    return;
   }
+  // PIN válido
+  document.getElementById('pin-ov')?.remove();
+  localStorage.setItem(DASH_KEY,'yes');
+  localStorage.setItem(PIN_KEY,coordPin);
+  IS_DASH = true;
+  document.getElementById('app').style.display = 'none';
+  document.getElementById('dash-page').style.display = 'block';
+  document.body.style.overflow = 'auto';
+  refreshDash();
+  if(dashRefreshIv)clearInterval(dashRefreshIv);
+  dashRefreshIv=setInterval(()=>{if(IS_DASH)refreshDash();},15000);
 }
 
 function exitDash(){
   localStorage.removeItem(DASH_KEY);
+  localStorage.removeItem(PIN_KEY);
+  if(dashRefreshIv){clearInterval(dashRefreshIv);dashRefreshIv=null;}
+  coordPin='';
   IS_DASH = false;
   document.getElementById('dash-page').style.display = 'none';
   document.getElementById('app').style.display = '';
@@ -817,17 +861,13 @@ async function sendSem(){
   const doc={obs:S.meta.obs,grp:S.meta.grp,pto:S.meta.pto,mom:S.meta.mom,fecha:S.meta.fecha,cond:S.meta.cond,module:'m1',semNum:semN,data:JSON.parse(JSON.stringify(S.m1.data)),sentAt:new Date().toISOString(),ts:Date.now()};
   if(semN===1&&S.meta.photo)doc.photo=S.meta.photo;
   let dbOk=false;
-  if(dbApi){try{const id=Date.now()+'-'+Math.random().toString(36).substr(2,6);await dbApi.collection('submissions').doc(id).set(doc);dbOk=true;}catch(e){
-    console.warn('DB write error:',e?.code||e?.message||e);
-    if(e?.code==='not_granted'||e?.code==='permission_denied'||String(e).includes('not_granted')){
-      toast('⚠️ Sin permiso de escritura — contacta al coordinador');
-    }}}
-  try{const q=JSON.parse(localStorage.getItem('pend')||'[]');q.push({...doc,dbOk});localStorage.setItem('pend',JSON.stringify(q.slice(-50)));}catch(e){}
+  try{await insertDoc(doc);dbOk=true;}
+  catch(e){console.warn('Supabase insert error:',e?.message||e);}
   S.m1.semNum++;S.m1.data=mkSem();sv();buildM1();rM1();
   if(dbOk){
     toast('✅ Semáforo '+semN+' enviado al dashboard');
   }else{
-    showShareModal('🚦 Semáforo '+semN, fmtDocWA(doc), !dbApi, doc);
+    showShareModal('🚦 Semáforo '+semN, fmtDocWA(doc), true, doc);
   }
   updSummary();
 }
@@ -906,17 +946,13 @@ async function sendIntento(){
   const itN=S.m2.intentoNum;
   const doc={obs:S.meta.obs,grp:S.meta.grp,pto:S.meta.pto,mom:S.meta.mom,fecha:S.meta.fecha,cond:S.meta.cond,module:'m2',intentoNum:itN,data:JSON.parse(JSON.stringify(d)),sentAt:new Date().toISOString(),ts:Date.now()};
   let dbOk=false;
-  if(dbApi){try{const id=Date.now()+'-'+Math.random().toString(36).substr(2,6);await dbApi.collection('submissions').doc(id).set(doc);dbOk=true;}catch(e){
-    console.warn('DB write error:',e?.code||e?.message||e);
-    if(e?.code==='not_granted'||e?.code==='permission_denied'||String(e).includes('not_granted')){
-      toast('⚠️ Sin permiso de escritura — contacta al coordinador');
-    }}}
-  try{const q=JSON.parse(localStorage.getItem('pend')||'[]');q.push({...doc,dbOk});localStorage.setItem('pend',JSON.stringify(q.slice(-50)));}catch(e){}
+  try{await insertDoc(doc);dbOk=true;}
+  catch(e){console.warn('Supabase insert error:',e?.message||e);}
   S.m2.intentoNum++;S.m2.data=mkIntento();sv();buildM2();rM2();
   if(dbOk){
     toast('✅ Intento '+itN+' enviado al dashboard');
   }else{
-    showShareModal('🤝 Intento '+itN, fmtDocWA(doc), !dbApi, doc);
+    showShareModal('🤝 Intento '+itN, fmtDocWA(doc), true, doc);
   }
   updSummary();
 }
@@ -926,12 +962,7 @@ function updSummary(){
   if(e1){e1.textContent=s1>0?s1+' semáforo'+(s1!==1?'s':'')+' enviados':'0 enviados';e1.className='sum-val '+(s1>0?'has':'empty');}
   if(e2){e2.textContent=s2>0?s2+' intento'+(s2!==1?'s':'')+' enviados':'0 enviados';e2.className='sum-val '+(s2>0?'has':'empty');}
 }
-function subEnvios(){if(!dbApi||unsubFn)return;
-  try{unsubFn=dbApi.collection('submissions').orderBy('ts','desc').onSnapshot(snap=>{
-    allDocs=snap.docs.filter(d=>d.exists).map(d=>({id:d.id,...gd(d)}));
-    if(IS_DASH)dpRender();
-  },e=>console.warn(e));}catch(e){console.warn(e);}
-}
+/* El dashboard se refresca vía polling cada 15s (ver refreshDash/init). */
 
 /* ══ DASHBOARD JS ══ */
 let dpDocs=[];
@@ -975,7 +1006,6 @@ function dpRender(){
     grpSel.innerHTML='<option value="">Todos los grupos</option>'+groups.map(g=>`<option value="${g}"${g===cur?' selected':''}>${g}</option>`).join('');
   }
   const dab=document.getElementById('dp-del-all');if(dab)dab.style.display=allDocs.length?'flex':'none';
-  const bdl=document.getElementById('bdl');if(bdl&&dlApi)bdl.style.display='flex';
   dpFilter();
 }
 
@@ -1305,16 +1335,17 @@ async function dpImport(){
   try{doc=JSON.parse(match[1]);}
   catch(e){if(msg){msg.style.color='#e63946';msg.textContent='⚠️ Error al leer los datos. Pega el mensaje sin modificar.';}return;}
 
-  if(!dbApi){if(msg){msg.style.color='#e63946';msg.textContent='⚠️ Sin conexión a la base de datos.';}return;}
+  if(!sb){if(msg){msg.style.color='#e63946';msg.textContent='⚠️ Sin conexión a la base de datos.';}return;}
 
   if(msg){msg.style.color='#718096';msg.textContent='Guardando...';}
   try{
-    const id=(doc.ts||Date.now())+'-import-'+Math.random().toString(36).substr(2,4);
     const toSave={...doc,importedAt:new Date().toISOString()};
     delete toSave.id;
-    await dbApi.collection('submissions').doc(id).set(toSave);
+    toSave.__id=(doc.ts||Date.now())+'-import-'+Math.random().toString(36).substr(2,4);
+    await insertDoc(toSave);
     if(msg){msg.style.color='#38a169';msg.textContent='✅ Datos de '+doc.obs+' guardados correctamente';}
     if(ta)ta.value='';
+    refreshDash();
     setTimeout(()=>{if(msg)msg.textContent='';},4000);
   }catch(e){
     console.warn('import error:',e);
@@ -1370,11 +1401,12 @@ function sumM2(d){if(!d)return'—';
 function relT(ms){const d=Date.now()-ms;if(d<60e3)return'hace '+Math.floor(d/1e3)+'s';if(d<36e5)return'hace '+Math.floor(d/6e4)+'m';return new Date(ms).toLocaleDateString('es-CO');}
 let _lastDel=null,_undoTv=null;
 async function delDoc(id){
-  if(!dbApi){toast('Sin conexión');return;}
   const doc=allDocs.find(d=>d.id===id);
   try{
-    await dbApi.collection('submissions').doc(id).delete();
+    await apiDash('delete',{id});
     _lastDel=doc?{...doc}:null;
+    allDocs=allDocs.filter(d=>d.id!==id);
+    dpRender();
     // Show toast with undo button
     const t=document.getElementById('toast');
     t.innerHTML='Eliminado &nbsp;<button onclick="undoDel()" style="background:rgba(255,255,255,.2);border:1px solid rgba(255,255,255,.4);color:#fff;border-radius:20px;padding:3px 10px;font-size:.72rem;font-weight:800;cursor:pointer">↩ Deshacer</button>';
@@ -1384,19 +1416,18 @@ async function delDoc(id){
   }catch(e){toast('No se pudo eliminar');}
 }
 async function undoDel(){
-  if(!_lastDel||!dbApi)return;
+  if(!_lastDel)return;
   try{
-    const d={..._lastDel};const id=d.id;delete d.id;
-    await dbApi.collection('submissions').doc(id).set(d);
+    await apiDash('restore',{doc:_lastDel});
     _lastDel=null;clearTimeout(_undoTv);
     const t=document.getElementById('toast');
     t.innerHTML='↩ Acción deshecha';
     setTimeout(()=>t.classList.remove('on'),1800);
+    refreshDash();
     toast('↩ Registro restaurado');
   }catch(e){toast('Error al deshacer');}
 }
-async function delAll(){if(!dbApi){toast('Sin conexión');return;}if(!allDocs.length){toast('No hay datos');return;}const btn=document.getElementById('delallbtn');if(btn){btn.disabled=true;btn.textContent='Eliminando...';}for(const d of allDocs){try{await dbApi.collection('submissions').doc(d.id).delete();}catch(e){}}try{localStorage.removeItem('pend');}catch(e){}toast('Eliminados ✓');if(btn){btn.disabled=false;btn.textContent='🗑 Eliminar todos los datos';}}
-async function syncPending(){if(!dbApi)return;try{const q=JSON.parse(localStorage.getItem('pend')||'[]');let c=false;for(const d of q){if(!d.dbOk){try{await dbApi.collection('submissions').doc(d.id).set(d);d.dbOk=true;c=true;}catch(e){}}}if(c)localStorage.setItem('pend',JSON.stringify(q));}catch(e){}}
+async function delAll(){if(!allDocs.length){toast('No hay datos');return;}const btn=document.getElementById('delallbtn');if(btn){btn.disabled=true;btn.textContent='Eliminando...';}try{await apiDash('delete_all');}catch(e){}allDocs=[];dpRender();toast('Eliminados ✓');if(btn){btn.disabled=false;btn.textContent='🗑 Eliminar todos los datos';}}
 function bTxt(){const L='═'.repeat(54),l='─'.repeat(54);let t=L+'\n  CIVISMO VIAL CALI — REPORTE\n'+L+'\nGenerado: '+new Date().toLocaleString('es-CO')+'\n'+l+'\n\n';
   allDocs.forEach((d,i)=>{const lbl=d.module==='m1'?'M1 Sem '+d.semNum:'M2 Int '+(d.intentoNum||'?');
     t+=`[${i+1}] ${lbl} · ${d.obs} · ${d.grp}\n    ${d.pto} · M${d.mom} · ${d.fecha}\n`;
@@ -1407,7 +1438,7 @@ function bTxt(){const L='═'.repeat(54),l='─'.repeat(54);let t=L+'\n  CIVISMO
     else if(d.module==='m2'&&d.data){const dt=d.data;const quien={A:'Auto',M:'Moto',B:'Bus'}[dt.quien]||'—';
       t+=`    Espera:${quien} | Ced:${dt.cedieron||'—'} | Carros NC:${dt.auto_total||0} | Motos NC:${dt.moto_total||0}\n`;}
     t+='\n';});return t+L+'\n';}
-async function doDownload(){const txt=bTxt(),fn='civismo-cali-'+new Date().toISOString().split('T')[0]+'.txt';if(dlApi){try{await dlApi.save({filename:fn,data:txt});toast('Descargado ✓');}catch(e){if(e.code!=='declined')doCopy();}}else doCopy();}
+async function doDownload(){const txt=bTxt(),fn='civismo-cali-'+new Date().toISOString().split('T')[0]+'.txt';const blob=new Blob([txt],{type:'text/plain;charset=utf-8'});const url=URL.createObjectURL(blob);const a=document.createElement('a');a.href=url;a.download=fn;document.body.appendChild(a);a.click();document.body.removeChild(a);URL.revokeObjectURL(url);toast('Descargado ✓');}
 function doCopy(){navigator.clipboard?.writeText(bTxt()).then(()=>toast('Copiado ✓')).catch(()=>toast('No se pudo copiar'));}
 async function sendFinal(){
   if(!S.on){toast('Primero inicia la sesión');return;}
@@ -1440,9 +1471,9 @@ async function sendFinal(){
     const sessDoc={obs:S.meta.obs,grp:S.meta.grp,pto:S.meta.pto,mom:S.meta.mom,
       fecha:S.meta.fecha,cond:S.meta.cond,module:'session',
       startPhoto:S.meta.photo||null,endPhoto:S.meta.endPhoto||null,
-      sentAt:new Date().toISOString(),ts:Date.now()};
-    if(dbApi){try{const id=Date.now()+'-s-'+Math.random().toString(36).substr(2,4);
-      await dbApi.collection('submissions').doc(id).set(sessDoc);}catch(e){}}
+      sentAt:new Date().toISOString(),ts:Date.now(),
+      __id:Date.now()+'-s-'+Math.random().toString(36).substr(2,4)};
+    try{await insertDoc(sessDoc);}catch(e){console.warn('session save:',e?.message||e);}
   }
   const msg=count>0?'✅ Enviado — volviendo al inicio...':'✅ Todo guardado — volviendo al inicio...';
   toast(msg);
@@ -1475,7 +1506,6 @@ function renderDashboard(){
   const d2=document.getElementById('ds-m2');if(d2)d2.textContent=m2docs.length;
   const do_=document.getElementById('ds-obs');if(do_)do_.textContent=obs;
   const dab=document.getElementById('delallbtn');if(dab)dab.style.display=allDocs.length?'flex':'none';
-  const bdl=document.getElementById('bdl');if(bdl&&dlApi)bdl.style.display='flex';
 
   // Aggregate M1
   const ag={moto_respeta:0,moto_cruza:0,moto_cebra:0,moto_hombre:0,moto_mujer:0,

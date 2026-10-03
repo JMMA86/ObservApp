@@ -1,6 +1,11 @@
--- ObservApp · Cali
+-- ============================================================
+-- ObservApp · Cali — Setup de Supabase
 -- Ejecuta TODO este archivo en Supabase > SQL Editor.
+-- ============================================================
 
+-- ------------------------------------------------------------
+-- 1) TABLA DE RESPUESTAS
+-- ------------------------------------------------------------
 create table if not exists public.submissions (
   id text primary key,
   payload jsonb not null,
@@ -9,18 +14,19 @@ create table if not exists public.submissions (
   grp text,
   module text,
   mom text,
-  sent_at timestamptz,
-  imported_at timestamptz
+  sent_at timestamptz default now()
 );
 
 alter table public.submissions enable row level security;
 
--- Quitamos privilegios amplios y damos solamente lo necesario.
+-- Permisos base: los estudiantes (anon) solo pueden INSERTAR.
 revoke all on table public.submissions from anon, authenticated;
 grant insert on table public.submissions to anon;
-grant select, insert, update, delete on table public.submissions to authenticated;
 
--- Los estudiantes pueden ENVIAR respuestas, pero no leerlas.
+-- El dashboard lee/borra mediante el serverless proxy con service_role,
+-- por lo que no necesita permisos de tabla para authenticated.
+
+-- Cualquiera puede enviar respuestas (ROL anon).
 drop policy if exists "public_can_submit" on public.submissions;
 create policy "public_can_submit"
 on public.submissions
@@ -28,31 +34,32 @@ for insert
 to anon, authenticated
 with check (true);
 
--- Solo el usuario autenticado del dashboard puede consultar.
-drop policy if exists "dashboard_can_read" on public.submissions;
-create policy "dashboard_can_read"
-on public.submissions
+-- ------------------------------------------------------------
+-- 2) BUCKET DE FOTOS (público)
+-- ------------------------------------------------------------
+insert into storage.buckets (id, name, public)
+values ('observapp', 'observapp', true)
+on conflict (id) do update set public = true;
+
+-- Los estudiantes pueden SUBIR fotos, pero no listarlas ni borrarlas.
+drop policy if exists "anon_upload_photos" on storage.objects;
+create policy "anon_upload_photos"
+on storage.objects
+for insert
+to anon, authenticated
+with check (bucket_id = 'observapp');
+
+-- Lectura pública de las fotos (bucket público + política de select).
+drop policy if exists "public_read_photos" on storage.objects;
+create policy "public_read_photos"
+on storage.objects
 for select
-to authenticated
-using (true);
+to anon, authenticated
+using (bucket_id = 'observapp');
 
--- Necesario para eliminar/restaurar desde el dashboard.
-drop policy if exists "dashboard_can_update" on public.submissions;
-create policy "dashboard_can_update"
-on public.submissions
-for update
-to authenticated
-using (true)
-with check (true);
-
-drop policy if exists "dashboard_can_delete" on public.submissions;
-create policy "dashboard_can_delete"
-on public.submissions
-for delete
-to authenticated
-using (true);
-
--- Índices para ordenar/filtrar más rápido.
+-- ------------------------------------------------------------
+-- 3) ÍNDICES
+-- ------------------------------------------------------------
 create index if not exists submissions_ts_idx on public.submissions(ts desc);
 create index if not exists submissions_module_idx on public.submissions(module);
 create index if not exists submissions_grp_idx on public.submissions(grp);

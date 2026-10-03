@@ -1,0 +1,9 @@
+{
+  "name": "observapp-cali",
+  "version": "1.0.0",
+  "private": true,
+  "description": "ObservApp · Cali — observación de comportamiento vial",
+  "engines": {
+    "node": ">=18"
+  }
+}
